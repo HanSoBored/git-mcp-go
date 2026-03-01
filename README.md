@@ -52,9 +52,42 @@ AI models often suffer from a "knowledge cutoff" or hallucinate library versions
 
 ---
 
+## Visualizing the Data Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant AI as AI Agent
+    participant MCP as Git-Remote-MCP
+    participant GitHub as GitHub API
+
+    User->>AI: "Use library X in my project"
+    AI->>MCP: get_tags(url_X, limit=5)
+    MCP->>GitHub: Request Tags Metadata (Auth Token)
+    GitHub-->>MCP: Raw Tags Data
+    Note over MCP: Sorting via SemVer Logic
+    MCP-->>AI: ["v2.1.0", "v2.0.9", ...]
+
+    AI->>MCP: search_repository(query="struct Config")
+    MCP->>GitHub: Search Code API
+    GitHub-->>MCP: Result Paths
+    MCP-->>AI: Found in "src/config.rs"
+
+    AI->>User: "Here is the code using v2.1.0 and correct config struct"
+```
+
+---
+
 ## Installation
 
-### Option A: Build from Source (Go)
+### Option A: Quick Install (Binary)
+Install the pre-compiled binary for your OS and Architecture (`Linux x86_64/aarch64/armv7` or `macOS Intel/Silicon`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HanSoBored/git-mcp-go/main/install.sh | bash
+```
+
+### Option B: Build from Source (Go)
 
 Requires Go 1.21+:
 
@@ -64,7 +97,7 @@ cd git-mcp-go
 ./build.sh
 ```
 
-### Option B: Manual Build
+### Option C: Manual Build
 
 ```bash
 go mod download
