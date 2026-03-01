@@ -1,0 +1,16 @@
+# Go build artifacts
+git_mcp
+git_mcp_*
+
+# Go module files (optional, uncomment if you don't want to commit them)
+# go.mod
+# go.sum
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
