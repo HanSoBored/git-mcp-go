@@ -6,7 +6,7 @@ on:
       - main
       - master
     paths:
-      - 'version'
+      - 'src/version'
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ jobs:
       - name: Get version
         id: get_version
         run: |
-          VERSION=$(cat version | tr -d '[:space:]')
+          VERSION=$(cat src/version | tr -d '[:space:]')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       - name: Check Tag
         id: check_tag
@@ -89,19 +89,21 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm || '' }}
+        working-directory: src/
         run: |
-          go build -ldflags="-s -w" -o ${{ matrix.asset_name }}
+          mkdir -p ../build
+          go build -ldflags="-s -w" -o ../build/${{ matrix.asset_name }}
 
       - name: Prepare Asset
         shell: bash
         run: |
-          chmod +x ${{ matrix.asset_name }}
+          chmod +x build/${{ matrix.asset_name }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
+          path: build/${{ matrix.asset_name }}
 
   create-release:
     needs: [check-version, build-binaries]
@@ -116,6 +118,7 @@ jobs:
         with:
           pattern: binary-*
           merge-multiple: true
+          path: build
 
       - name: Generate Changelog
         uses: orhun/git-cliff-action@v4
@@ -133,11 +136,11 @@ jobs:
           name: Release ${{ needs.check-version.outputs.version }}
           body: ${{ steps.git_cliff.outputs.content }}
           files: |
-            git-mcp-go-linux-x86_64
-            git-mcp-go-linux-aarch64
-            git-mcp-go-linux-armv7
-            git-mcp-go-darwin-aarch64
-            git-mcp-go-darwin-x86_64
+            build/git-mcp-go-linux-x86_64
+            build/git-mcp-go-linux-aarch64
+            build/git-mcp-go-linux-armv7
+            build/git-mcp-go-darwin-aarch64
+            build/git-mcp-go-darwin-x86_64
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

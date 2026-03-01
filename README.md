@@ -84,7 +84,7 @@ sequenceDiagram
 Install the pre-compiled binary for your OS and Architecture (`Linux x86_64/aarch64/armv7` or `macOS Intel/Silicon`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HanSoBored/git-mcp-go/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/HanSoBored/git-mcp-go/main/installation/install.sh | bash
 ```
 
 ### Option B: Build from Source (Go)
@@ -94,12 +94,13 @@ Requires Go 1.21+:
 ```bash
 git clone https://github.com/HanSoBored/git-mcp-go.git
 cd git-mcp-go
-./build.sh
+./installation/build.sh
 ```
 
 ### Option C: Manual Build
 
 ```bash
+cd src/
 go mod download
 go build -ldflags="-s -w" -o git_mcp
 
