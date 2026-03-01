@@ -37,7 +37,7 @@ jobs:
   build-binaries:
     needs: check-version
     if: needs.check-version.outputs.tag_exists == 'false'
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.asset_name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -46,31 +46,35 @@ jobs:
           # --- LINUX ---
           # Standard Server/Desktop (x86_64)
           - os: ubuntu-latest
-            target: linux/amd64
             asset_name: git-mcp-go-linux-x86_64
+            goos: linux
+            goarch: amd64
 
           # ARM64 (Raspberry Pi 4, AWS Graviton)
           - os: ubuntu-latest
-            target: linux/arm64
             asset_name: git-mcp-go-linux-aarch64
+            goos: linux
+            goarch: arm64
 
           # ARMv7 (Raspberry Pi 2/3)
           - os: ubuntu-latest
-            target: linux/arm
             asset_name: git-mcp-go-linux-armv7
+            goos: linux
             goarch: arm
             goarm: "7"
 
           # --- MACOS ---
           # Apple Silicon (M1/M2/M3)
           - os: macos-latest
-            target: darwin/arm64
             asset_name: git-mcp-go-darwin-aarch64
+            goos: darwin
+            goarch: arm64
 
           # Intel Mac
           - os: macos-latest
-            target: darwin/amd64
             asset_name: git-mcp-go-darwin-x86_64
+            goos: darwin
+            goarch: amd64
 
     steps:
       - uses: actions/checkout@v4
@@ -82,8 +86,8 @@ jobs:
 
       - name: Build Binary
         env:
-          GOOS: ${{ matrix.goarch == 'arm' && 'linux' || split(matrix.target, '/')[0] }}
-          GOARCH: ${{ matrix.goarch || split(matrix.target, '/')[1] }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm || '' }}
         run: |
           go build -ldflags="-s -w" -o ${{ matrix.asset_name }}
