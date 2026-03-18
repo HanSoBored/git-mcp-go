@@ -6,7 +6,7 @@ on:
       - main
       - master
     paths:
-      - 'src/version'
+      - 'VERSION'
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ jobs:
       - name: Get version
         id: get_version
         run: |
-          VERSION=$(cat src/version | tr -d '[:space:]')
+          VERSION=$(cat VERSION | tr -d '[:space:]')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       - name: Check Tag
         id: check_tag
@@ -125,7 +125,7 @@ jobs:
         id: git_cliff
         with:
           config: .github/external/cliff.toml
-          args: --verbose --tag ${{ needs.check-version.outputs.version }} --strip header
+          args: --verbose --unreleased --tag v${{ needs.check-version.outputs.version }} --strip all
         env:
           OUTPUT: CHANGELOG.md
 
