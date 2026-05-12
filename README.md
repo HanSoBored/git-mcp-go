@@ -81,8 +81,22 @@ sequenceDiagram
 ## Installation
 
 ### Option A: Quick Install (Binary)
-Install the pre-compiled binary for your OS and Architecture (`Linux x86_64/aarch64/armv7` or `macOS Intel/Silicon`):
 
+**Recommended (Secure):** Download and review the script first, then execute:
+
+```bash
+# Download the install script
+curl -fsSL https://raw.githubusercontent.com/HanSoBored/git-mcp-go/main/installation/install.sh -o install.sh
+
+# Review the script (important!)
+cat install.sh
+
+# Execute if you trust it
+bash install.sh
+rm install.sh
+```
+
+**Use at your own risk (One-liner):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/HanSoBored/git-mcp-go/main/installation/install.sh | bash
 ```

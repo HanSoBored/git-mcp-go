@@ -1,5 +1,7 @@
 module git-mcp
 
-go 1.25.7
+go 1.24.0
 
-require golang.org/x/mod v0.33.0 // indirect
+toolchain go1.26.3
+
+require golang.org/x/mod v0.33.0
