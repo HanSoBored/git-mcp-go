@@ -12,8 +12,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/mod/semver"
@@ -30,6 +32,19 @@ const (
 	maxChangelogEntries   = 200              // Maximum changelog entries before truncation
 	githubAPITimeout      = 30 * time.Second // Timeout for GitHub API requests
 	githubAPI             = "https://api.github.com"
+	maxLanguageFilterLen  = 20
+	maxFilenameFilterLen  = 100
+	maxAuthorFilterLen    = 39 // GitHub username max length
+	maxDateFilterLen      = 30 // e.g. "2024-01-01..2024-12-31"
+	maxSearchQueryLen     = 512
+	maxListLimit          = 100
+	defaultListLimit      = 30
+	maxLabelsFilterLen    = 256
+	maxBranchFilterLen    = 100
+	maxReposPerSearch     = 10
+	defaultLimitPerRepo   = 10
+	maxGlobalSearchLimit  = 100
+	defaultGlobalSearchLimit = 30
 )
 
 // defaultVersion is the fallback version when not set via -ldflags
@@ -199,10 +214,76 @@ var allTools = []toolDef{
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"url":   map[string]interface{}{"type": "string", "description": "GitHub repository URL"},
-				"query": map[string]interface{}{"type": "string", "description": "Code or text to search (e.g., 'fn main', 'class User', 'dlopen')"},
+				"url":      map[string]interface{}{"type": "string", "description": "GitHub repository URL"},
+				"query":    map[string]interface{}{"type": "string", "description": "Code or text to search (e.g., 'fn main', 'class User', 'dlopen')"},
+				"language": map[string]interface{}{"type": "string", "description": "Filter by programming language (e.g., 'Go', 'Python')"},
+				"filename": map[string]interface{}{"type": "string", "description": "Filter by filename or path pattern"},
+				"author":   map[string]interface{}{"type": "string", "description": "Filter by commit author username"},
+				"date":     map[string]interface{}{"type": "string", "description": "Filter by commit date (e.g., '>=2024-01-01', '<=2024-12-31')"},
 			},
 			"required": []string{"url", "query"},
+		},
+	},
+	{
+		Name:        "list_issues",
+		Description: "List issues for a repository with filtering options",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url":    map[string]interface{}{"type": "string", "description": "GitHub repository URL"},
+				"state":  map[string]interface{}{"type": "string", "description": "Filter by state: open, closed, all"},
+				"labels": map[string]interface{}{"type": "string", "description": "Filter by labels (comma-separated)"},
+				"author": map[string]interface{}{"type": "string", "description": "Filter by issue author username"},
+				"limit":  map[string]interface{}{"type": "integer", "description": "Maximum results (1-100, default: 30)"},
+			},
+			"required": []string{"url"},
+		},
+	},
+	{
+		Name:        "list_pull_requests",
+		Description: "List pull requests for a repository with filtering options",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url":    map[string]interface{}{"type": "string", "description": "GitHub repository URL"},
+				"state":  map[string]interface{}{"type": "string", "description": "Filter by state: open, closed, all"},
+				"head":   map[string]interface{}{"type": "string", "description": "Filter by head branch"},
+				"base":   map[string]interface{}{"type": "string", "description": "Filter by base branch"},
+				"author": map[string]interface{}{"type": "string", "description": "Filter by PR author username"},
+				"limit":  map[string]interface{}{"type": "integer", "description": "Maximum results (1-100, default: 30)"},
+			},
+			"required": []string{"url"},
+		},
+	},
+	{
+		Name:        "search_multiple_repos",
+		Description: "Search for code across multiple GitHub repositories in parallel. Returns aggregated results from all repositories.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"repos": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]string{"type": "string"},
+					"description": "List of GitHub repository URLs (max 10)",
+				},
+				"query":        map[string]interface{}{"type": "string", "description": "Code or text to search"},
+				"language":     map[string]interface{}{"type": "string", "description": "Filter by programming language"},
+				"filename":     map[string]interface{}{"type": "string", "description": "Filter by filename pattern"},
+				"limit_per_repo": map[string]interface{}{"type": "integer", "description": "Max results per repo (default: 10)"},
+			},
+			"required": []string{"repos", "query"},
+		},
+	},
+	{
+		Name:        "github_global_search",
+		Description: "Search code across ALL of GitHub (global search). Use for finding patterns across multiple projects.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{"type": "string", "description": "Search query (GitHub search syntax supported)"},
+				"limit": map[string]interface{}{"type": "integer", "description": "Max results (1-100, default: 30)"},
+			},
+			"required": []string{"query"},
 		},
 	},
 }
@@ -210,6 +291,15 @@ var allTools = []toolDef{
 // ============================================================================
 // Global Variables
 // ============================================================================
+
+// repoQualifierPattern is used to extract repo: qualifier from search queries
+var repoQualifierPattern = regexp.MustCompile(`repo:([^\s]+)`)
+
+// ownerRepoPattern validates owner/repo format
+var ownerRepoPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,38}[a-zA-Z0-9])?/[a-zA-Z0-9._-]{1,100}$`)
+
+// validDatePattern validates date filter format
+var validDatePattern = regexp.MustCompile(`^([><=]?\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2})$`)
 
 // ============================================================================
 // URL Parsing and Validation
@@ -268,6 +358,61 @@ func resolveRepo(rawURL string) (owner, repo string, err error) {
 		return "", "", fmt.Errorf("missing required parameter: url")
 	}
 	return parseGitHubURL(rawURL)
+}
+
+// parseGitHubSearchURL extracts owner/repo and query from GitHub search URLs
+// Returns:
+// - owner, repo, extractedQuery, nil for search URLs with repo: qualifier
+// - "", "", query, nil for non-search URLs (caller should use resolveRepo)
+// - "", "", "", err for search URLs without repo: qualifier
+func parseGitHubSearchURL(rawURL string) (string, string, string, error) {
+	if rawURL == "" {
+		return "", "", "", nil
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", "", fmt.Errorf("invalid URL format: %w", err)
+	}
+
+	// Check if it's a GitHub search URL
+	if parsed.Host != "github.com" || !strings.HasPrefix(parsed.Path, "/search") {
+		return "", "", "", nil // Not a search URL
+	}
+
+	// Validate search type (must be code search, not issues/prs)
+	queryParams := parsed.Query()
+	searchType := queryParams.Get("type")
+	if searchType != "" && searchType != "code" {
+		return "", "", "", fmt.Errorf("only code search is supported, got type=%s", searchType)
+	}
+
+	q := queryParams.Get("q")
+	if q == "" {
+		return "", "", "", nil // No query in search URL
+	}
+
+	// Extract repo: qualifier using regexp
+	matches := repoQualifierPattern.FindStringSubmatch(q)
+	if len(matches) >= 2 {
+		repoValue := matches[1]
+		// Validate owner/repo format
+		if !ownerRepoPattern.MatchString(repoValue) {
+			return "", "", "", fmt.Errorf("invalid repo: qualifier format: %s", repoValue)
+		}
+		parts := strings.Split(repoValue, "/")
+		if len(parts) == 2 {
+			// Remove repo: qualifier from query for potential use
+			extractedQuery := strings.TrimSpace(repoQualifierPattern.ReplaceAllString(q, ""))
+			if extractedQuery == "" {
+				return "", "", "", fmt.Errorf("search URL has repo: qualifier but no search query")
+			}
+			return parts[0], parts[1], extractedQuery, nil
+		}
+	}
+
+	// Search URL without repo: qualifier
+	return "", "", "", fmt.Errorf("search URL must contain repo: qualifier for repository-specific search")
 }
 
 // getString helper function to read string arguments from JSONRPC
@@ -637,7 +782,7 @@ func getFileContent(ctx context.Context, client *githubClient, link, filePath, b
 
 	body, err := client.doAPIRaw(ctx, owner, repo, fmt.Sprintf("contents/%s?ref=%s", cleanPath, branch), "application/vnd.github.raw")
 	if err != nil {
-		return nil, fmt.Errorf("Failed to read file: %w", err)
+		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	content := string(body)
@@ -657,26 +802,104 @@ func getFileContent(ctx context.Context, client *githubClient, link, filePath, b
 	return result, nil
 }
 
+// buildSearchQuery constructs a GitHub Search API query string with filters
+func buildSearchQuery(query, owner, repo, language, filename, author, date string) string {
+	q := fmt.Sprintf("%s repo:%s/%s", query, owner, repo)
+
+	if language != "" {
+		q += fmt.Sprintf(" language:%s", language)
+	}
+
+	if filename != "" {
+		q += fmt.Sprintf(" filename:%s", filename)
+	}
+
+	if author != "" {
+		q += fmt.Sprintf(" author:%s", author)
+	}
+
+	if date != "" {
+		q += fmt.Sprintf(" %s", date)
+	}
+
+	return q
+}
+
+// validateSearchFilters validates the length and format of search filter parameters
+func validateSearchFilters(language, filename, author, date string) error {
+	if len(language) > maxLanguageFilterLen {
+		return fmt.Errorf("language filter exceeds maximum length of %d characters", maxLanguageFilterLen)
+	}
+
+	if len(filename) > maxFilenameFilterLen {
+		return fmt.Errorf("filename filter exceeds maximum length of %d characters", maxFilenameFilterLen)
+	}
+
+	if len(author) > maxAuthorFilterLen {
+		return fmt.Errorf("author filter exceeds maximum length of %d characters", maxAuthorFilterLen)
+	}
+
+	if date != "" {
+		if len(date) > maxDateFilterLen {
+			return fmt.Errorf("date filter exceeds maximum length of %d characters", maxDateFilterLen)
+		}
+		// Validate date format: >YYYY-MM-DD, <YYYY-MM-DD, YYYY-MM-DD..YYYY-MM-DD
+		if !validDatePattern.MatchString(date) {
+			return fmt.Errorf("invalid date format. Use: >YYYY-MM-DD, <YYYY-MM-DD, or YYYY-MM-DD..YYYY-MM-DD")
+		}
+	}
+
+	return nil
+}
+
 // searchRepository searches for code within a GitHub repository and returns code snippets
-func searchRepository(ctx context.Context, client *githubClient, link, query string) (interface{}, error) {
+func searchRepository(ctx context.Context, client *githubClient, link, query, language, filename, author, date string, limit int) (interface{}, error) {
 	debugf("Searching '%s' in %s", query, link)
 
-	// Check required parameters
+	// Clamp limit to GitHub API max
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Check if link is a search URL
+	owner, repo, extractedQuery, err := parseGitHubSearchURL(link)
+	if err != nil {
+		return nil, err
+	}
+	if owner != "" && repo != "" {
+		// Search URL with repo: qualifier - use extracted values
+		if extractedQuery != "" && query == "" {
+			query = extractedQuery
+		}
+	} else {
+		// Not a search URL or no repo: qualifier - use resolveRepo
+		owner, repo, err = resolveRepo(link)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Validate query after extracting from search URL
 	if query == "" {
 		return nil, fmt.Errorf("missing required parameter: query")
 	}
 
-	owner, repo, err := resolveRepo(link)
-	if err != nil {
+	if len(query) > maxSearchQueryLen {
+		return nil, fmt.Errorf("query exceeds maximum length of %d characters", maxSearchQueryLen)
+	}
+
+	if err := validateSearchFilters(language, filename, author, date); err != nil {
 		return nil, err
 	}
 
-	// Format query for GitHub Search API: "search_term repo:owner/repo"
-	q := fmt.Sprintf("%s repo:%s/%s", query, owner, repo)
+	q := buildSearchQuery(query, owner, repo, language, filename, author, date)
 
+	if limit <= 0 {
+		limit = 10
+	}
 	params := url.Values{}
 	params.Add("q", q)
-	params.Add("per_page", "10") // Limit to 10 results to avoid overwhelming AI context
+	params.Add("per_page", fmt.Sprintf("%d", limit))
 
 	apiUrl := fmt.Sprintf("%s/search/code?%s", githubAPI, params.Encode())
 
@@ -686,9 +909,13 @@ func searchRepository(ctx context.Context, client *githubClient, link, query str
 	}
 
 	if err := checkStatus(resp); err != nil {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		resp.Body.Close()
-		return nil, fmt.Errorf("Search API Error: %d. Detail: %s (Note: GitHub Search API requires GITHUB_TOKEN)", resp.StatusCode, string(bodyBytes))
+		detail := "unknown"
+		if readErr == nil && len(bodyBytes) > 0 {
+			detail = strings.TrimSpace(string(bodyBytes))
+		}
+		return nil, fmt.Errorf("search API error: %d. Detail: %s", resp.StatusCode, detail)
 	}
 
 	// JSON structure to capture GitHub's response with text matches
@@ -715,6 +942,484 @@ func searchRepository(ctx context.Context, client *githubClient, link, query str
 		"query":       query,
 		"total_found": result.TotalCount,
 		"results":     results,
+	}, nil
+}
+
+type searchResult struct {
+	repo   string
+	result interface{}
+	err    error
+}
+
+func searchMultipleRepos(ctx context.Context, client *githubClient, repos []string, query, language, filename string, limitPerRepo int) (interface{}, error) {
+	// L1: Early query validation
+	if query == "" {
+		return nil, fmt.Errorf("missing required parameter: query")
+	}
+	if len(query) > maxSearchQueryLen {
+		return nil, fmt.Errorf("query exceeds maximum length of %d characters", maxSearchQueryLen)
+	}
+
+	if len(repos) == 0 {
+		return nil, fmt.Errorf("repos array cannot be empty")
+	}
+
+	if len(repos) > maxReposPerSearch {
+		return nil, fmt.Errorf("too many repositories: %d (max: %d)", len(repos), maxReposPerSearch)
+	}
+
+	for i, repo := range repos {
+		if repo == "" {
+			return nil, fmt.Errorf("repository URL at index %d is empty", i)
+		}
+		if _, _, err := parseGitHubURL(repo); err != nil {
+			return nil, fmt.Errorf("invalid repository URL at index %d: %w", i, err)
+		}
+	}
+
+	// L2: Deduplicate repos
+	seen := make(map[string]bool)
+	uniqueRepos := []string{}
+	for _, repo := range repos {
+		if !seen[repo] {
+			seen[repo] = true
+			uniqueRepos = append(uniqueRepos, repo)
+		}
+	}
+	repos = uniqueRepos
+
+	if limitPerRepo < 1 {
+		limitPerRepo = defaultLimitPerRepo
+	}
+
+	resultChan := make(chan searchResult, len(repos))
+	var wg sync.WaitGroup
+
+	// M2: Add semaphore to limit concurrency to 3 requests
+	sem := make(chan struct{}, 3)
+
+	for _, repo := range repos {
+		wg.Add(1)
+		go func(repoURL string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			result, err := searchRepository(ctx, client, repoURL, query, language, filename, "", "", limitPerRepo)
+			resultChan <- searchResult{repo: repoURL, result: result, err: err}
+		}(repo)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	var allResults []map[string]interface{}
+	var errors []string
+	repoResults := make(map[string]interface{})
+
+	for res := range resultChan {
+		if res.err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", res.repo, res.err))
+			repoResults[res.repo] = map[string]interface{}{
+				"success": false,
+				"error":   res.err.Error(),
+			}
+		} else {
+			if data, ok := res.result.(map[string]interface{}); ok {
+				// M1: Safe type assertion with comma-ok idiom
+				results, ok := data["results"].([]map[string]interface{})
+				if !ok {
+					errors = append(errors, fmt.Sprintf("%s: unexpected result format", res.repo))
+					repoResults[res.repo] = map[string]interface{}{
+						"success": false,
+						"error":   "unexpected result format",
+					}
+					continue
+				}
+				for _, r := range results {
+					r["repository"] = res.repo
+					allResults = append(allResults, r)
+				}
+				repoResults[res.repo] = map[string]interface{}{
+					"success":     true,
+					"total_found": data["total_found"],
+					"count":       len(results),
+				}
+			}
+		}
+	}
+
+	response := map[string]interface{}{
+		"query":         query,
+		"repos_searched": len(repos),
+		"repos":         repos,
+		"total_results": len(allResults),
+		"results":       allResults,
+		"repo_status":   repoResults,
+	}
+
+	if len(errors) > 0 {
+		response["errors"] = errors
+	}
+
+	return response, nil
+}
+
+// githubGlobalSearch searches code across ALL of GitHub using the global search API
+func githubGlobalSearch(ctx context.Context, client *githubClient, query string, limit int) (interface{}, error) {
+	debugf("Global search for: '%s' (limit: %d)", query, limit)
+
+	if query == "" {
+		return nil, fmt.Errorf("missing required parameter: query")
+	}
+
+	if len(query) > maxSearchQueryLen {
+		return nil, fmt.Errorf("query exceeds maximum length of %d characters", maxSearchQueryLen)
+	}
+
+	if limit <= 0 {
+		limit = defaultGlobalSearchLimit
+	}
+	if limit > maxGlobalSearchLimit {
+		limit = maxGlobalSearchLimit
+	}
+
+	params := url.Values{}
+	params.Add("q", query)
+	params.Add("per_page", fmt.Sprintf("%d", limit))
+
+	apiUrl := fmt.Sprintf("%s/search/code?%s", githubAPI, params.Encode())
+
+	resp, err := client.get(ctx, apiUrl, "application/vnd.github.v3.text-match+json")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := checkStatus(resp); err != nil {
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		resp.Body.Close()
+		detail := "unknown"
+		if readErr == nil && len(bodyBytes) > 0 {
+			detail = strings.TrimSpace(string(bodyBytes))
+		}
+		return nil, fmt.Errorf("search API error: %d. Detail: %s", resp.StatusCode, detail)
+	}
+
+	// JSON structure to capture GitHub's response with text matches
+	var result struct {
+		TotalCount int `json:"total_count"`
+		Items      []struct {
+			Name        string `json:"name"`
+			Path        string `json:"path"`
+			HtmlUrl     string `json:"html_url"`
+			Repository  struct {
+				FullName string `json:"full_name"`
+			} `json:"repository"`
+			TextMatches []struct {
+				Fragment string `json:"fragment"`
+			} `json:"text_matches"`
+		} `json:"items"`
+	}
+
+	if err := client.decodeJSON(resp, &result); err != nil {
+		return nil, err
+	}
+
+	// Transform results to include repository information
+	results := make([]map[string]interface{}, len(result.Items))
+	for i, item := range result.Items {
+		var snippets []string
+		for _, match := range item.TextMatches {
+			snippets = append(snippets, match.Fragment)
+		}
+		results[i] = map[string]interface{}{
+			"file":       item.Name,
+			"path":       item.Path,
+			"url":        item.HtmlUrl,
+			"repository": item.Repository.FullName,
+			"snippets":   snippets,
+		}
+	}
+
+	return map[string]interface{}{
+		"query":       query,
+		"total_found": result.TotalCount,
+		"limit":       limit,
+		"results":     results,
+	}, nil
+}
+
+// mapIssues transforms GitHub API issue response to clean format
+func mapIssues(issues []struct {
+	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	State     string `json:"state"`
+	User      *struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
+	Labels    []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	HtmlUrl   string `json:"html_url"`
+}) []map[string]interface{} {
+	result := make([]map[string]interface{}, len(issues))
+	for i, issue := range issues {
+		labels := make([]string, len(issue.Labels))
+		for j, label := range issue.Labels {
+			labels[j] = label.Name
+		}
+		author := ""
+		if issue.User != nil {
+			author = issue.User.Login
+		}
+		result[i] = map[string]interface{}{
+			"number":     issue.Number,
+			"title":      issue.Title,
+			"state":      issue.State,
+			"author":     author,
+			"created_at": issue.CreatedAt,
+			"updated_at": issue.UpdatedAt,
+			"labels":     labels,
+			"url":        issue.HtmlUrl,
+		}
+	}
+	return result
+}
+
+// mapPullRequests transforms GitHub API PR response to clean format
+func mapPullRequests(prs []struct {
+	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	State     string `json:"state"`
+	User      *struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
+	Head      struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
+	Base      struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+	Mergeable *bool  `json:"mergeable"`
+	Merged    bool   `json:"merged"`
+	HtmlUrl   string `json:"html_url"`
+}) []map[string]interface{} {
+	result := make([]map[string]interface{}, len(prs))
+	for i, pr := range prs {
+		var mergeable interface{}
+		if pr.Mergeable != nil {
+			mergeable = *pr.Mergeable
+		} else {
+			mergeable = nil
+		}
+		author := ""
+		if pr.User != nil {
+			author = pr.User.Login
+		}
+		result[i] = map[string]interface{}{
+			"number":      pr.Number,
+			"title":       pr.Title,
+			"state":       pr.State,
+			"author":      author,
+			"created_at":  pr.CreatedAt,
+			"updated_at":  pr.UpdatedAt,
+			"head_branch": pr.Head.Ref,
+			"base_branch": pr.Base.Ref,
+			"mergeable":   mergeable,
+			"merged":      pr.Merged,
+			"url":         pr.HtmlUrl,
+		}
+	}
+	return result
+}
+
+// validateState validates the state parameter for issues/PRs API
+func validateState(state string) error {
+	if state == "" {
+		return nil
+	}
+	validStates := map[string]bool{"open": true, "closed": true, "all": true}
+	if !validStates[state] {
+		return fmt.Errorf("invalid state: %s. Must be one of: open, closed, all", state)
+	}
+	return nil
+}
+
+// validateListLimit validates the limit parameter (1-100)
+func validateListLimit(limit int) error {
+	if limit < 1 || limit > maxListLimit {
+		return fmt.Errorf("limit must be between 1 and %d", maxListLimit)
+	}
+	return nil
+}
+
+// listIssues fetches issues for a repository with filtering options
+func listIssues(ctx context.Context, client *githubClient, link, state, labels, author string, limit int) (interface{}, error) {
+	debugf("Fetching issues for: %s (state: %s, labels: %s, author: %s, limit: %d)", link, state, labels, author, limit)
+
+	if err := validateState(state); err != nil {
+		return nil, err
+	}
+
+	if len(labels) > maxLabelsFilterLen {
+		return nil, fmt.Errorf("labels filter exceeds maximum length of %d characters", maxLabelsFilterLen)
+	}
+
+	if len(author) > maxAuthorFilterLen {
+		return nil, fmt.Errorf("author filter exceeds maximum length of %d characters", maxAuthorFilterLen)
+	}
+
+	if err := validateListLimit(limit); err != nil {
+		return nil, err
+	}
+
+	owner, repo, err := resolveRepo(link)
+	if err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	params.Add("per_page", fmt.Sprintf("%d", limit))
+
+	if state != "" {
+		params.Add("state", state)
+	}
+	if labels != "" {
+		params.Add("labels", labels)
+	}
+	if author != "" {
+		params.Add("creator", author)
+	}
+
+	endpoint := "issues?" + params.Encode()
+
+	var issues []struct {
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		State     string `json:"state"`
+		User      *struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		CreatedAt string   `json:"created_at"`
+		UpdatedAt string   `json:"updated_at"`
+		Labels    []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+		HtmlUrl string `json:"html_url"`
+	}
+
+	if err := client.doAPI(ctx, owner, repo, endpoint, "", &issues); err != nil {
+		return nil, err
+	}
+
+	mappedIssues := mapIssues(issues)
+
+	return map[string]interface{}{
+		"repository": link,
+		"state":      state,
+		"labels":     labels,
+		"author":     author,
+		"count":      len(mappedIssues),
+		"issues":     mappedIssues,
+	}, nil
+}
+
+
+
+// validateBranchFilter validates branch filter parameters
+func validateBranchFilter(filter, name string) error {
+	if len(filter) > maxBranchFilterLen {
+		return fmt.Errorf("%s filter exceeds maximum length of %d characters", name, maxBranchFilterLen)
+	}
+	return nil
+}
+
+// listPullRequests fetches pull requests for a repository with filtering options
+func listPullRequests(ctx context.Context, client *githubClient, link, state, head, base, author string, limit int) (interface{}, error) {
+	debugf("Fetching pull requests for: %s (state: %s, head: %s, base: %s, author: %s, limit: %d)", link, state, head, base, author, limit)
+
+	if err := validateState(state); err != nil {
+		return nil, err
+	}
+
+	if err := validateBranchFilter(head, "head"); err != nil {
+		return nil, err
+	}
+
+	if err := validateBranchFilter(base, "base"); err != nil {
+		return nil, err
+	}
+
+	if len(author) > maxAuthorFilterLen {
+		return nil, fmt.Errorf("author filter exceeds maximum length of %d characters", maxAuthorFilterLen)
+	}
+
+	if err := validateListLimit(limit); err != nil {
+		return nil, err
+	}
+
+	owner, repo, err := resolveRepo(link)
+	if err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	params.Add("per_page", fmt.Sprintf("%d", limit))
+
+	if state != "" {
+		params.Add("state", state)
+	}
+	if head != "" {
+		params.Add("head", head)
+	}
+	if base != "" {
+		params.Add("base", base)
+	}
+	if author != "" {
+		params.Add("creator", author)
+	}
+
+	endpoint := "pulls?" + params.Encode()
+
+	var prs []struct {
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		State     string `json:"state"`
+		User      *struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		CreatedAt string   `json:"created_at"`
+		UpdatedAt string   `json:"updated_at"`
+		Head      struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+		Base      struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+		Mergeable *bool  `json:"mergeable"`
+		Merged    bool   `json:"merged"`
+		HtmlUrl   string `json:"html_url"`
+	}
+
+	if err := client.doAPI(ctx, owner, repo, endpoint, "", &prs); err != nil {
+		return nil, err
+	}
+
+	mappedPRs := mapPullRequests(prs)
+
+	return map[string]interface{}{
+		"repository": link,
+		"state":      state,
+		"head":       head,
+		"base":       base,
+		"author":     author,
+		"count":      len(mappedPRs),
+		"pull_requests": mappedPRs,
 	}, nil
 }
 
@@ -753,7 +1458,7 @@ func handleToolCall(ctx context.Context, client *githubClient, name string, args
 	}
 	jsonBytes, marshalErr := json.Marshal(data)
 	if marshalErr != nil {
-		return toolErrorResult(fmt.Sprintf("Failed to marshal response: %v", marshalErr))
+		return toolErrorResult(fmt.Sprintf("failed to marshal response: %v", marshalErr))
 	}
 	return toolSuccessResult(string(jsonBytes))
 }
@@ -783,7 +1488,62 @@ func dispatchTool(ctx context.Context, client *githubClient, name string, args m
 		return getFileContent(ctx, client, urlStr, path, branch)
 	case "search_repository":
 		query, _ := getString(args, "query")
-		return searchRepository(ctx, client, urlStr, query)
+		language, _ := getString(args, "language")
+		filename, _ := getString(args, "filename")
+		author, _ := getString(args, "author")
+		date, _ := getString(args, "date")
+		limit := 10
+		if l, ok := args["limit"].(float64); ok && l > 0 {
+			limit = int(l)
+		}
+		return searchRepository(ctx, client, urlStr, query, language, filename, author, date, limit)
+	case "list_issues":
+		state, _ := getString(args, "state")
+		labels, _ := getString(args, "labels")
+		author, _ := getString(args, "author")
+		limit := defaultListLimit
+		if l, ok := args["limit"].(float64); ok && l > 0 {
+			limit = int(l)
+		}
+		return listIssues(ctx, client, urlStr, state, labels, author, limit)
+	case "list_pull_requests":
+		state, _ := getString(args, "state")
+		head, _ := getString(args, "head")
+		base, _ := getString(args, "base")
+		author, _ := getString(args, "author")
+		limit := defaultListLimit
+		if l, ok := args["limit"].(float64); ok && l > 0 {
+			limit = int(l)
+		}
+		return listPullRequests(ctx, client, urlStr, state, head, base, author, limit)
+	case "search_multiple_repos":
+		reposInterface, ok := args["repos"].([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("repos must be an array of strings")
+		}
+		repos := make([]string, len(reposInterface))
+		for i, r := range reposInterface {
+			if s, ok := r.(string); ok {
+				repos[i] = s
+			} else {
+				return nil, fmt.Errorf("repos[%d] must be a string", i)
+			}
+		}
+		query, _ := getString(args, "query")
+		language, _ := getString(args, "language")
+		filename, _ := getString(args, "filename")
+		limitPerRepo := defaultLimitPerRepo
+		if l, ok := args["limit_per_repo"].(float64); ok && l > 0 {
+			limitPerRepo = int(l)
+		}
+		return searchMultipleRepos(ctx, client, repos, query, language, filename, limitPerRepo)
+	case "github_global_search":
+		query, _ := getString(args, "query")
+		limit := defaultGlobalSearchLimit
+		if l, ok := args["limit"].(float64); ok && l > 0 {
+			limit = int(l)
+		}
+		return githubGlobalSearch(ctx, client, query, limit)
 	default:
 		return nil, fmt.Errorf("tool %q not found", name)
 	}
@@ -793,7 +1553,7 @@ func dispatchTool(ctx context.Context, client *githubClient, name string, args m
 func writeResponse(response map[string]interface{}) {
 	respBytes, err := json.Marshal(response)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Failed to marshal response: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] failed to marshal response: %v\n", err)
 		return
 	}
 	fmt.Println(string(respBytes))

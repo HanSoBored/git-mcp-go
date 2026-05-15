@@ -44,11 +44,14 @@ AI models often suffer from a "knowledge cutoff" or hallucinate library versions
 | Tool | Description |
 |------|-------------|
 | `get_tags` | Returns latest tags/versions. Supports `limit` and **SemVer sorting** (e.g., `v1.10` > `v1.9`). |
-| `search_repository` | Search for code, specific functions, or text definitions within the repo. |
+| `search_repository` | Search for code, functions, or text. Optional filters: `language`, `filename`, `author`, `date`. |
 | `get_file_tree` | Recursively lists files to reveal project architecture/structure. |
 | `get_file_content` | Reads the raw content of specific files from any branch/tag. |
 | `get_readme` | Automatically fetches the default README for a quick project overview. |
 | `get_changelog` | Compares two tags and returns a summary of commit messages. |
+| `list_issues` | List issues with filtering by `state`, `labels`, `author`. Default limit: 30. |
+| `list_pull_requests` | List PRs with filtering by `state`, `head`, `base`, `author`. Default limit: 30. |
+| `search_multiple_repos` | Search across up to 10 repos. Filters: `language`, `filename`. Results per repo: 10 (default). |
 
 ---
 
@@ -159,6 +162,9 @@ You are equipped with the 'git-remote' MCP toolset.
 2. Before suggesting implementation details, use 'search_repository' to find relevant code definitions (structs, functions).
 3. Use 'get_file_content' to read the actual code context before answering.
 4. If a user asks about a project structure, use 'get_file_tree'.
+5. For issue/PR tracking, use 'list_issues' and 'list_pull_requests' with appropriate filters (state, labels, author).
+6. To search across multiple repositories, use 'search_multiple_repos' (max 10 repos per call).
+7. Leverage search filters (language, filename, author, date) to narrow down 'search_repository' results.
 ```
 
 ---
@@ -178,6 +184,34 @@ User: "How does this project handle dlopen?"
 AI: [Calls search_repository with query="dlopen"]
 AI: [Calls get_file_content to read the relevant file]
 AI: "Here's how dlopen is handled..."
+```
+
+### Search with Filters (Phase 1)
+```
+User: "Find all TypeScript files with 'config' in the filename"
+AI: [Calls search_repository with query="config", filename="*.ts", language="TypeScript"]
+AI: "Found 5 TypeScript config files..."
+```
+
+### List Issues
+```
+User: "Show open issues labeled 'bug' by author 'john'"
+AI: [Calls list_issues with url="https://github.com/org/repo", state="open", labels="bug", author="john", limit=20]
+AI: "Found 3 matching issues..."
+```
+
+### List Pull Requests
+```
+User: "Show PRs targeting main branch from feature/* branches"
+AI: [Calls list_pull_requests with url="https://github.com/org/repo", base="main", head="feature/", state="open"]
+AI: "Found 2 open PRs..."
+```
+
+### Multi-Repo Search (Phase 2B)
+```
+User: "Search for 'auth middleware' across our microservices"
+AI: [Calls search_multiple_repos with repos=[url1, url2, url3], query="auth middleware", language="Go", limit_per_repo=5]
+AI: "Results from 3 repos: service-a (2), service-b (1), service-c (0)..."
 ```
 
 ---
