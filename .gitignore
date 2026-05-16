@@ -1,10 +1,9 @@
 # Go build artifacts
 git_mcp
 git_mcp_*
-
-# Go module files (optional, uncomment if you don't want to commit them)
-# go.mod
-# go.sum
+git-mcp-go
+git-mcp
+git-mcp_*
 
 # IDE
 .idea/
@@ -14,3 +13,6 @@ git_mcp_*
 # OS
 .DS_Store
 Thumbs.db
+
+# Environment
+.env

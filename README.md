@@ -22,7 +22,7 @@ AI models often suffer from a "knowledge cutoff" or hallucinate library versions
 
 ## Why Go?
 
-1. **Zero System Dependencies:** No OpenSSL or C-bindings required (unlike `reqwest` in Rust which can have cross-compilation issues).
+1. **Zero System Dependencies:** No OpenSSL or C-bindings required.
 2. **Super Fast Compilation:** Rebuilds complete in under 0.5 seconds.
 3. **Easy Cross-Compilation:** Build for any platform with simple `GOOS/GOARCH` environment variables.
 4. **Concurrency Ready:** Future features can leverage Go's `goroutines` for parallel repository operations.
@@ -45,6 +45,7 @@ AI models often suffer from a "knowledge cutoff" or hallucinate library versions
 |------|-------------|
 | `get_tags` | Returns latest tags/versions. Supports `limit` and **SemVer sorting** (e.g., `v1.10` > `v1.9`). |
 | `search_repository` | Search for code, functions, or text. Optional filters: `language`, `filename`, `author`, `date`. |
+| `github_global_search` | Search across **ALL of GitHub** (global search). Filters: `language`, `filename`. Max results: 100 (default: 30). |
 | `get_file_tree` | Recursively lists files to reveal project architecture/structure. |
 | `get_file_content` | Reads the raw content of specific files from any branch/tag. |
 | `get_readme` | Automatically fetches the default README for a quick project overview. |
@@ -164,7 +165,8 @@ You are equipped with the 'git-remote' MCP toolset.
 4. If a user asks about a project structure, use 'get_file_tree'.
 5. For issue/PR tracking, use 'list_issues' and 'list_pull_requests' with appropriate filters (state, labels, author).
 6. To search across multiple repositories, use 'search_multiple_repos' (max 10 repos per call).
-7. Leverage search filters (language, filename, author, date) to narrow down 'search_repository' results.
+7. For cross-project patterns, use 'github_global_search' to search ALL of GitHub (not limited to specific repos).
+8. Leverage search filters (language, filename, author, date) to narrow down 'search_repository' results.
 ```
 
 ---
@@ -186,7 +188,7 @@ AI: [Calls get_file_content to read the relevant file]
 AI: "Here's how dlopen is handled..."
 ```
 
-### Search with Filters (Phase 1)
+### Search with Filters
 ```
 User: "Find all TypeScript files with 'config' in the filename"
 AI: [Calls search_repository with query="config", filename="*.ts", language="TypeScript"]
@@ -207,11 +209,18 @@ AI: [Calls list_pull_requests with url="https://github.com/org/repo", base="main
 AI: "Found 2 open PRs..."
 ```
 
-### Multi-Repo Search (Phase 2B)
+### Multi-Repo Search
 ```
 User: "Search for 'auth middleware' across our microservices"
 AI: [Calls search_multiple_repos with repos=[url1, url2, url3], query="auth middleware", language="Go", limit_per_repo=5]
 AI: "Results from 3 repos: service-a (2), service-b (1), service-c (0)..."
+```
+
+### Global GitHub Search
+```
+User: "Find all Go implementations of rate limiting across GitHub"
+AI: [Calls github_global_search with query="rate limiter", language="Go", limit=50]
+AI: "Found 50 repositories with rate limiting implementations..."
 ```
 
 ---
