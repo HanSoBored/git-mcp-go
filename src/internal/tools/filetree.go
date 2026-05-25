@@ -3,7 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
-	"strings"
+	"net/url"
 
 	"git-mcp/internal/client"
 	"git-mcp/pkg/utils"
@@ -27,7 +27,7 @@ func flattenTree(tree []struct {
 
 // GetFileTree fetches the file tree structure of a repository
 func GetFileTree(ctx context.Context, client *client.GithubClient, link, branch string) (interface{}, error) {
-	utils.Debugf("Fetching Tree: %s", link)
+	utils.Debugf("Fetching tree: %s", link)
 
 	owner, repo, err := utils.ResolveRepo(link)
 	if err != nil {
@@ -49,30 +49,30 @@ func GetFileTree(ctx context.Context, client *client.GithubClient, link, branch 
 		} `json:"tree"`
 	}
 
-	if err := client.DoAPI(ctx, owner, repo, fmt.Sprintf("git/trees/%s?recursive=1", branch), "", &result); err != nil {
+	params := url.Values{}
+	params.Set("recursive", "1")
+	endpoint := fmt.Sprintf("git/trees/%s?%s", branch, params.Encode())
+	if err := client.DoAPI(ctx, owner, repo, endpoint, "", &result); err != nil {
 		return nil, err
 	}
 
 	files := flattenTree(result.Tree)
+	return buildTreeResponse(link, branch, files), nil
+}
 
-	// Truncate if more than maxFileTreeEntries
-	fileListStr := strings.Join(files, "\n")
-	truncateResult := utils.Truncate(fileListStr, utils.MaxFileTreeEntries*50)
-
+func buildTreeResponse(link, branch string, files []string) map[string]interface{} {
 	response := map[string]interface{}{
 		"repository": link,
 		"ref":        branch,
 		"files":      files,
 	}
 
-	// Update files with truncated content
-	if truncateResult.IsTruncated {
-		lines := strings.Split(truncateResult.Content, "\n")
-		response["files"] = lines
+	if len(files) > utils.MaxFileTreeEntries {
+		response["files"] = files[:utils.MaxFileTreeEntries]
 		response["is_truncated"] = true
-		response["original_length"] = truncateResult.OriginalLength
-		response["truncated_at"] = truncateResult.TruncatedAt
+		response["original_length"] = len(files)
+		response["truncated_at"] = utils.MaxFileTreeEntries
 	}
 
-	return response, nil
+	return response
 }

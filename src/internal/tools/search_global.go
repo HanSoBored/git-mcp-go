@@ -3,14 +3,13 @@ package tools
 import (
 	"context"
 	"fmt"
-	"net/url"
 
 	"git-mcp/internal/client"
 	"git-mcp/pkg/types"
 	"git-mcp/pkg/utils"
 )
 
-// validateGlobalSearchParams validates parameters for GithubGlobalSearch.
+// validateGlobalSearchParams validates the search query and limit parameters.
 func validateGlobalSearchParams(query string, limit int) error {
 	if err := utils.ValidateQuery(query); err != nil {
 		return err
@@ -25,19 +24,6 @@ func validateGlobalSearchParams(query string, limit int) error {
 	}
 
 	return nil
-}
-
-// buildGlobalSearchEndpoint builds the global search API endpoint URL
-func buildGlobalSearchEndpoint(query string, limit int) string {
-	if limit <= 0 {
-		limit = utils.DefaultGlobalSearchLimit
-	}
-
-	params := url.Values{}
-	params.Add("q", query)
-	params.Add("per_page", fmt.Sprintf("%d", limit))
-
-	return fmt.Sprintf("%s/search/code?%s", utils.GithubAPI, params.Encode())
 }
 
 // GithubGlobalSearch performs a code search across all of GitHub.
@@ -61,23 +47,18 @@ func GithubGlobalSearch(
 		return nil, err
 	}
 
-	apiUrl := buildGlobalSearchEndpoint(query, limit)
-
-	resp, err := client.Get(ctx, apiUrl, "application/vnd.github.v3.text-match+json")
-	if err != nil {
-		return nil, err
-	}
-
-	if err := utils.HandleAPIError(resp); err != nil {
-		return nil, err
-	}
+	apiURL := utils.SearchCodeURL(query, limit)
 
 	var result types.GlobalSearchAPIResponse
-
-	if err := client.DecodeJSON(resp, &result); err != nil {
+	if err := client.DoRaw(ctx, apiURL, acceptTextMatch, &result); err != nil {
 		return nil, err
 	}
 
+	return formatGlobalSearchResults(&result, query, limit), nil
+}
+
+// formatGlobalSearchResults converts a GlobalSearchAPIResponse into an MCP-friendly map.
+func formatGlobalSearchResults(result *types.GlobalSearchAPIResponse, query string, limit int) map[string]interface{} {
 	results := make([]map[string]interface{}, len(result.Items))
 	for i, item := range result.Items {
 		results[i] = map[string]interface{}{
@@ -94,5 +75,5 @@ func GithubGlobalSearch(
 		"total_found": result.TotalCount,
 		"limit":       limit,
 		"results":     results,
-	}, nil
+	}
 }

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"git-mcp/internal/client"
@@ -10,7 +11,11 @@ import (
 )
 
 // GetFileContent reads the content of a specific file
-func GetFileContent(ctx context.Context, client *client.GithubClient, link, filePath, branch string) (interface{}, error) {
+func GetFileContent(
+	ctx context.Context,
+	client *client.GithubClient,
+	link, filePath, branch string,
+) (interface{}, error) {
 	utils.Debugf("Reading file: %s @ %s", filePath, link)
 
 	// Check required parameters
@@ -32,7 +37,10 @@ func GetFileContent(ctx context.Context, client *client.GithubClient, link, file
 	}
 	cleanPath := strings.TrimPrefix(filePath, "/")
 
-	body, err := client.DoAPIRaw(ctx, owner, repo, fmt.Sprintf("contents/%s?ref=%s", cleanPath, branch), "application/vnd.github.raw")
+	params := url.Values{}
+	params.Set("ref", branch)
+	endpoint := fmt.Sprintf("contents/%s?%s", cleanPath, params.Encode())
+	body, err := client.DoAPIRaw(ctx, owner, repo, endpoint, "application/vnd.github.raw")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}

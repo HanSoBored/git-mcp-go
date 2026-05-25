@@ -2,8 +2,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
-	"net/url"
 
 	"git-mcp/internal/client"
 	"git-mcp/pkg/types"
@@ -42,12 +40,7 @@ func validateSearchParams(query, language, filename, author, date string, limit 
 // buildSearchEndpoint builds the search API endpoint URL
 func buildSearchEndpoint(owner, repo, query, language, filename, author, date string, limit int) string {
 	q := buildSearchQuery(query, owner, repo, language, filename, author, date)
-
-	params := url.Values{}
-	params.Add("q", q)
-	params.Add("per_page", fmt.Sprintf("%d", limit))
-
-	return fmt.Sprintf("%s/search/code?%s", utils.GithubAPI, params.Encode())
+	return utils.SearchCodeURL(q, limit)
 }
 
 // parseSearchParams extracts and validates search parameters from inputs.
@@ -89,7 +82,7 @@ func executeSearch(
 	client *client.GithubClient,
 	params *searchParams,
 ) (*types.SearchAPIResponse, error) {
-	apiUrl := buildSearchEndpoint(
+	apiURL := buildSearchEndpoint(
 		params.owner,
 		params.repo,
 		params.query,
@@ -100,17 +93,8 @@ func executeSearch(
 		params.limit,
 	)
 
-	resp, err := client.Get(ctx, apiUrl, "application/vnd.github.v3.text-match+json")
-	if err != nil {
-		return nil, err
-	}
-
-	if err := utils.HandleAPIError(resp); err != nil {
-		return nil, err
-	}
-
 	var result types.SearchAPIResponse
-	if err := client.DecodeJSON(resp, &result); err != nil {
+	if err := client.DoRaw(ctx, apiURL, acceptTextMatch, &result); err != nil {
 		return nil, err
 	}
 

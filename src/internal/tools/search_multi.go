@@ -57,6 +57,9 @@ func deduplicateRepos(repos []string) []string {
 	return uniqueRepos
 }
 
+// defaultSearchConcurrency limits the number of concurrent GitHub API requests.
+const defaultSearchConcurrency = 3
+
 // runConcurrentSearch executes search jobs concurrently with semaphore limiting.
 //
 // Parameters:
@@ -66,9 +69,12 @@ func deduplicateRepos(repos []string) []string {
 //
 // Returns a channel of searchResult that will be closed when all jobs complete.
 func runConcurrentSearch(ctx context.Context, client *client.GithubClient, jobs []searchJob) <-chan searchResult {
+	ctx, cancel := context.WithCancel(ctx)
+
 	resultChan := make(chan searchResult, len(jobs))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 3)
+	sem := make(chan struct{}, defaultSearchConcurrency)
+	var errOnce sync.Once
 
 	for _, job := range jobs {
 		wg.Add(1)
@@ -82,10 +88,12 @@ func runConcurrentSearch(ctx context.Context, client *client.GithubClient, jobs 
 			defer func() { <-sem }()
 
 			result, err := SearchRepository(ctx, client, job.repoURL, job.query, job.language, job.filename, "", "", job.limit)
+			if err != nil {
+				errOnce.Do(func() { cancel() })
+			}
 			select {
 			case resultChan <- searchResult{repo: job.repoURL, result: result, err: err}:
 			case <-ctx.Done():
-				return
 			}
 		}(job)
 	}
@@ -93,6 +101,7 @@ func runConcurrentSearch(ctx context.Context, client *client.GithubClient, jobs 
 	go func() {
 		wg.Wait()
 		close(resultChan)
+		cancel()
 	}()
 
 	return resultChan
@@ -103,6 +112,14 @@ type aggregatedData struct {
 	results     []map[string]interface{}
 	errors      []string
 	repoResults map[string]interface{}
+}
+
+func (data *aggregatedData) recordRepoError(repo, errMsg string) {
+	data.errors = append(data.errors, fmt.Sprintf("%s: %s", repo, errMsg))
+	data.repoResults[repo] = map[string]interface{}{
+		"success": false,
+		"error":   errMsg,
+	}
 }
 
 // collectResults aggregates results from concurrent search operations.
@@ -121,31 +138,19 @@ func collectResults(resultsChan <-chan searchResult, repos []string) *aggregated
 
 	for res := range resultsChan {
 		if res.err != nil {
-			data.errors = append(data.errors, fmt.Sprintf("%s: %v", res.repo, res.err))
-			data.repoResults[res.repo] = map[string]interface{}{
-				"success": false,
-				"error":   res.err.Error(),
-			}
+			data.recordRepoError(res.repo, res.err.Error())
 			continue
 		}
 
 		resultData, ok := res.result.(map[string]interface{})
 		if !ok {
-			data.errors = append(data.errors, fmt.Sprintf("%s: unexpected result type", res.repo))
-			data.repoResults[res.repo] = map[string]interface{}{
-				"success": false,
-				"error":   "unexpected result type",
-			}
+			data.recordRepoError(res.repo, "unexpected result type")
 			continue
 		}
 
 		results, ok := resultData["results"].([]map[string]interface{})
 		if !ok {
-			data.errors = append(data.errors, fmt.Sprintf("%s: unexpected results type", res.repo))
-			data.repoResults[res.repo] = map[string]interface{}{
-				"success": false,
-				"error":   "unexpected results type",
-			}
+			data.recordRepoError(res.repo, "unexpected results type")
 			continue
 		}
 
@@ -190,9 +195,9 @@ func buildMultiRepoResponse(data *aggregatedData, repos []string, query string) 
 }
 
 // aggregateResults combines results from concurrent repository searches.
-func aggregateResults(resultsChan <-chan searchResult, repos []string, query string) (interface{}, error) {
+func aggregateResults(resultsChan <-chan searchResult, repos []string, query string) interface{} {
 	data := collectResults(resultsChan, repos)
-	return buildMultiRepoResponse(data, repos, query), nil
+	return buildMultiRepoResponse(data, repos, query)
 }
 
 // SearchMultipleRepos searches for code across multiple repositories concurrently.
@@ -222,6 +227,9 @@ func SearchMultipleRepos(
 	if limitPerRepo < 1 {
 		limitPerRepo = utils.DefaultLimitPerRepo
 	}
+	if limitPerRepo > utils.MaxListLimit {
+		limitPerRepo = utils.MaxListLimit
+	}
 
 	jobs := make([]searchJob, len(uniqueRepos))
 	for i, repo := range uniqueRepos {
@@ -236,5 +244,5 @@ func SearchMultipleRepos(
 
 	resultsChan := runConcurrentSearch(ctx, client, jobs)
 
-	return aggregateResults(resultsChan, uniqueRepos, query)
+	return aggregateResults(resultsChan, uniqueRepos, query), nil
 }

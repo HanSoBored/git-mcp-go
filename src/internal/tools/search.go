@@ -5,14 +5,20 @@ import (
 	"net/url"
 
 	"git-mcp/pkg/types"
+	"git-mcp/pkg/utils"
 )
+
+// acceptTextMatch is the GitHub API preview header for text-match metadata in search results.
+const acceptTextMatch = "application/vnd.github.v3.text-match+json"
 
 // buildSearchQuery constructs a GitHub code search query with filters.
 //
 // Parameters:
 //   - query: the search query string
 //   - owner, repo: repository owner and name
-//   - language, filename, author, date: optional filters
+//   - language, filename: optional filters
+//   - author, date: optional filters (NOTE: not supported by Code Search API,
+//     logged as debug warning and ignored)
 //
 // Returns a formatted search query string for the GitHub Code Search API.
 func buildSearchQuery(query, owner, repo, language, filename, author, date string) string {
@@ -27,11 +33,11 @@ func buildSearchQuery(query, owner, repo, language, filename, author, date strin
 	}
 
 	if author != "" {
-		q += fmt.Sprintf(" author:%s", author)
+		utils.Debugf("author filter is not supported by Code Search API; ignored: %s", author)
 	}
 
 	if date != "" {
-		q += fmt.Sprintf(" %s", date)
+		utils.Debugf("date filter is not supported by Code Search API; ignored: %s", date)
 	}
 
 	return q
