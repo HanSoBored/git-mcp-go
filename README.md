@@ -34,6 +34,8 @@ AI models often suffer from a "knowledge cutoff" or hallucinate library versions
 - **Zero-Clone Exploration:** Fetch trees, files, and metadata via GitHub API instantly.
 - **Smart Dependency Solving**: Fetches and sorts tags by **Semantic Versioning (SemVer)**, ensuring the AI suggests the *actual* latest version.
 - **Semantic Search:** Find functions, structs, or text across the entire repository using GitHub's Search API.
+- **Token Rotation**: Supports **multiple** `GITHUB_TOKEN_1..32` variables for automatic fallback when a token is rate-limited. Also reads `GITHUB_TOKEN` and `GH_TOKEN`.
+- **Intelligent Rate Limiting**: Automatically detects primary (token-based) vs secondary (abuse) rate limits, rotates tokens on primary limits, and backs off with `Retry-After` on secondary limits.
 - **Secure & Scalable**: Natively supports `GITHUB_TOKEN` authentication to increase API rate limits from 60 to **5,000 requests/hour**.
 - **Multi-Arch Support**: Cross-compile for `x86_64`, `aarch64` (ARM64), and `armv7` easily.
 
@@ -44,7 +46,7 @@ AI models often suffer from a "knowledge cutoff" or hallucinate library versions
 | Tool | Description |
 |------|-------------|
 | `get_tags` | Returns latest tags/versions. Supports `limit` and **SemVer sorting** (e.g., `v1.10` > `v1.9`). |
-| `search_repository` | Search for code, functions, or text. Optional filters: `language`, `filename`, `author`, `date`. |
+| `search_repository` | Search for code, functions, or text. Optional filters: `language`, `filename`. Note: `author` and `date` filters are **not supported** by the GitHub Code Search API and will be ignored (logged as warning). |
 | `github_global_search` | Search across **ALL of GitHub** (global search). Filters: `language`, `filename`. Max results: 100 (default: 30). |
 | `get_file_tree` | Recursively lists files to reveal project architecture/structure. |
 | `get_file_content` | Reads the raw content of specific files from any branch/tag. |
@@ -151,6 +153,28 @@ Add this to your MCP client configuration (Claude Desktop, Cursor, Gemini CLI, e
 
 **Important:** Adding a `GITHUB_TOKEN` is highly recommended to avoid the 60 requests/hour rate limit. With authentication, you get **5,000 requests/hour**.
 
+### Token Rotation (Optional)
+
+For higher reliability under heavy usage, configure multiple tokens. When a token hits its primary rate limit, the server automatically rotates to the next available token:
+
+```json
+{
+  "mcpServers": {
+    "git-remote": {
+      "command": "/usr/local/bin/git_mcp",
+      "args": [],
+      "env": {
+        "GITHUB_TOKEN_1": "ghp_token_one",
+        "GITHUB_TOKEN_2": "ghp_token_two",
+        "GITHUB_TOKEN_3": "ghp_token_three"
+      }
+    }
+  }
+}
+```
+
+The server reads tokens from (in priority order): `GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_TOKEN_1` through `GITHUB_TOKEN_32`. Duplicate tokens are automatically deduplicated. Primary rate limits trigger a token rotation; secondary rate limits (abuse detection) trigger a timed backoff instead.
+
 ---
 
 ## System Prompt for AI Agents
@@ -166,7 +190,7 @@ You are equipped with the 'git-remote' MCP toolset.
 5. For issue/PR tracking, use 'list_issues' and 'list_pull_requests' with appropriate filters (state, labels, author).
 6. To search across multiple repositories, use 'search_multiple_repos' (max 10 repos per call).
 7. For cross-project patterns, use 'github_global_search' to search ALL of GitHub (not limited to specific repos).
-8. Leverage search filters (language, filename, author, date) to narrow down 'search_repository' results.
+8. Leverage search filters (`language`, `filename`) to narrow down 'search_repository' results. Note: `author` and `date` are **not supported** by the GitHub Code Search API, only by commit search.
 ```
 
 ---
