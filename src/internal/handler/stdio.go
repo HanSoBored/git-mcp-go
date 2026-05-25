@@ -15,14 +15,16 @@ import (
 	"git-mcp/pkg/utils"
 )
 
-// writeResponse writes a JSON-RPC response to stdout
+// writeResponse writes a JSON-RPC response to stdout.
 func writeResponse(response map[string]interface{}) {
-	respBytes, err := json.Marshal(response)
+	data, err := json.Marshal(response)
 	if err != nil {
 		slog.Error("failed to marshal response", "error", err)
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s\n", string(respBytes))
+	if _, err := fmt.Fprintln(os.Stdout, string(data)); err != nil {
+		slog.Error("Failed to write response", "error", err)
+	}
 }
 
 // handleNotification processes notifications (requests without an ID).
@@ -36,7 +38,7 @@ func handleNotification(req types.JsonRpcRequest) {
 }
 
 // ServeStdio handles the main stdio loop for JSON-RPC communication
-func ServeStdio(client *client.GithubClient) {
+func ServeStdio(gc *client.GithubClient) {
 	scanner := bufio.NewScanner(os.Stdin)
 	// Set max input line size to maxScannerBufferSize to prevent resource exhaustion
 	scanner.Buffer(make([]byte, 0), utils.MaxScannerBufferSize)
@@ -61,7 +63,7 @@ func ServeStdio(client *client.GithubClient) {
 			continue
 		}
 
-		writeResponse(HandleRequest(ctx, client, &req))
+		writeResponse(HandleRequest(ctx, gc, &req))
 	}
 
 	if err := scanner.Err(); err != nil {
