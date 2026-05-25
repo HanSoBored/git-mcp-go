@@ -1,13 +1,23 @@
 package argutil
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // GetInt extracts an integer from a map[string]interface{}.
 // Returns the value if found and is a number, otherwise returns defaultValue.
 // Note: zero is a valid value and will be returned.
 func GetInt(args map[string]interface{}, key string, defaultValue int) int {
-	if val, ok := args[key].(float64); ok {
-		return int(val)
+	if val, ok := args[key]; ok {
+		switch v := val.(type) {
+		case float64:
+			return int(v)
+		case json.Number:
+			if i64, err := v.Int64(); err == nil {
+				return int(i64)
+			}
+		}
 	}
 	return defaultValue
 }
@@ -19,6 +29,16 @@ func GetString(args map[string]interface{}, key string) (string, bool) {
 		return val, true
 	}
 	return "", false
+}
+
+// GetRequiredString extracts a required string from a map[string]interface{}.
+// Returns an error if the key is missing or not a string.
+func GetRequiredString(args map[string]interface{}, key string) (string, error) {
+	val, ok := args[key].(string)
+	if !ok {
+		return "", fmt.Errorf("missing required argument: %s", key)
+	}
+	return val, nil
 }
 
 // GetBool extracts a boolean from a map[string]interface{}
